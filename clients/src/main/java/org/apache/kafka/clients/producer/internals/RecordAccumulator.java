@@ -78,6 +78,9 @@ public final class RecordAccumulator {
     private final BufferPool free;
     private final Time time;
     private final ApiVersions apiVersions;
+    /**
+     * TopicPartition双端队列的Map，会被并发访问，使用的是ArrayDeque
+     */
     private final ConcurrentMap<TopicPartition, Deque<ProducerBatch>> batches;
     private final IncompleteBatches incomplete;
     // The following variables are only accessed by the sender thread, so we don't need to protect them.
@@ -187,14 +190,16 @@ public final class RecordAccumulator {
                                      Header[] headers,
                                      Callback callback,
                                      long maxTimeToBlock) throws InterruptedException {
-        // We keep track of the number of appending thread to make sure we do not miss batches in
-        // abortIncompleteBatches().
+        // 记录当前正在进行append消息的线程数,方便当客户端调用KafkaProducer.close()强制关闭发送消息操作时放弃未处理完的请求,释放资源
         appendsInProgress.incrementAndGet();
+
         ByteBuffer buffer = null;
         if (headers == null) headers = Record.EMPTY_HEADERS;
         try {
             // check if we have an in-progress batch
             Deque<ProducerBatch> dq = getOrCreateDeque(tp);
+
+            // 多线程下，同Topic同分区的消息可能并发写入，要通过锁保护
             synchronized (dq) {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
@@ -203,27 +208,35 @@ public final class RecordAccumulator {
                     return appendResult;
             }
 
-            // we don't have an in-progress record batch try to allocate a new batch
+            // 如果双端队列中没有存在ProducerBatch，则上面的追加返回null，这里需要构造ProducerBatch
+            // 如果当前的ProducerBatch的空间不够了，则上面的追加返回null，这里需要构造ProducerBatch
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+            // 从BufferPool申请空间用于创建新的ProducerBatch对象
             buffer = free.allocate(size, maxTimeToBlock);
+
+            // 申请到内存后，需要再次锁定队列
             synchronized (dq) {
-                // Need to check if producer is closed again after grabbing the dequeue lock.
+                // 因为再次锁定期间，可能关闭，需要检查
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
 
+                // 因为再次锁定期间，可能别的线程申请了ProducerBatch，尝试插入
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq);
                 if (appendResult != null) {
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
                     return appendResult;
                 }
 
+                // 构造ProducerBatch
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, time.milliseconds());
                 FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, headers, callback, time.milliseconds()));
 
+                // 添加ProducerBatch到双端队列
                 dq.addLast(batch);
+                // 添加ProducerBatch到未完成队列
                 incomplete.add(batch);
 
                 // Don't deallocate this buffer in the finally block as it's being used in the record batch
@@ -231,8 +244,11 @@ public final class RecordAccumulator {
                 return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true);
             }
         } finally {
+            // 如果多线程导致别的线程新建了ProducerBatch，则本次申请的内存要释放掉
             if (buffer != null)
                 free.deallocate(buffer);
+
+            // 当前追加的线程数减一，与第一句对应
             appendsInProgress.decrementAndGet();
         }
     }
@@ -624,9 +640,10 @@ public final class RecordAccumulator {
     }
 
     /**
-     * Get the deque for the given topic-partition, creating it if necessary.
+     * 根据TopicPartition获取or创建消息对应的双端队列 Deque<ProducerBatch>,并与其进行关联
      */
     private Deque<ProducerBatch> getOrCreateDeque(TopicPartition tp) {
+        // 多线程场景使用ConcurrentHashMap的经典场景
         Deque<ProducerBatch> d = this.batches.get(tp);
         if (d != null)
             return d;

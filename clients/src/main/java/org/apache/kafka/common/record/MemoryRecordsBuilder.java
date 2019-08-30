@@ -54,6 +54,9 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private final ByteBufferOutputStream bufferStream;
     private final byte magic;
     private final int initialPosition;
+    /**
+     * 初始写入偏移量
+     */
     private final long baseOffset;
     private final long logAppendTime;
     private final boolean isControlBatch;
@@ -76,6 +79,9 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private float actualCompressionRatio = 1;
     private long maxTimestamp = RecordBatch.NO_TIMESTAMP;
     private long offsetOfMaxTimestamp = -1;
+    /**
+     * 当前写入偏移量
+     */
     private Long lastOffset = null;
     private Long firstTimestamp = null;
 
