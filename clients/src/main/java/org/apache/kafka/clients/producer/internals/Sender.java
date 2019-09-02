@@ -99,7 +99,7 @@ public class Sender implements Runnable {
     /* the clock instance used for getting the time */
     private final Time time;
 
-    /* true while the sender thread is still running */
+    /* 经典的多线程运行标志变量 */
     private volatile boolean running;
 
     /* true when the caller wants to ignore all unsent/inflight messages and force close.  */
@@ -121,6 +121,7 @@ public class Sender implements Runnable {
     private final TransactionManager transactionManager;
 
     // A per-partition queue of batches ordered by creation time for tracking the in-flight batches
+    // 保存准备发送还未成功的ProducerBatch
     private final Map<TopicPartition, List<ProducerBatch>> inFlightBatches;
 
     public Sender(LogContext logContext,
@@ -293,8 +294,7 @@ public class Sender implements Runnable {
     }
 
     /**
-     * Run a single iteration of sending
-     *
+     * 单次循环的运行逻辑
      */
     void runOnce() {
         if (transactionManager != null) {
@@ -331,16 +331,19 @@ public class Sender implements Runnable {
         }
 
         long currentTimeMs = time.milliseconds();
+
+
         long pollTimeout = sendProducerData(currentTimeMs);
         client.poll(pollTimeout, currentTimeMs);
     }
 
     private long sendProducerData(long now) {
+        // 从MetaData中获取集群Cluster的信息
         Cluster cluster = metadata.fetch();
-        // get the list of partitions with data ready to send
+        // 从累加器获取可以进行发送操作的Node信息
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
-        // if there are any partitions whose leaders are not known yet, force metadata update
+        // 如果存在Partition找不到Leader的情况，强制刷新metadata
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
@@ -358,15 +361,21 @@ public class Sender implements Runnable {
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
+            // 判断节点是否可以建立连接，如果可以建立连接
+            // 如果无法建立连接，则剔除
             if (!this.client.ready(node, now)) {
                 iter.remove();
+                // 记录节点重连或者限流时间，用于计算阻塞时间
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
             }
         }
 
-        // create produce requests
+        // 根据ready得到的可以发送的节点信息，从消息累加器的双端队列中取出可以发送的ProducerBatch
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
+
+        // 如果需要保证消息有序（max.in.flight.requests.per.connection == 1），
+        // 则当前已经有取出ProducerBatch的partition要被禁止取出，只有当前发送成功了才能继续，这样才能保证消息顺序
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<ProducerBatch> batchList : batches.values()) {
@@ -377,6 +386,8 @@ public class Sender implements Runnable {
 
         accumulator.resetNextBatchExpiryTime();
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
+        // 根据配置项${request.timeout.ms}的值,默认是 30s,过滤掉请求已超时的ProducerBatch,
+        // 若已超时则将该 ProducerBatch添加到过期队列List中,并将该ProducerBatch从双端队列中移除,同时释放内存空间
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
         expiredBatches.addAll(expiredInflightBatches);
 
@@ -396,6 +407,7 @@ public class Sender implements Runnable {
         }
         sensors.updateProduceRequestMetrics(batches);
 
+        // 根据累加器返回的过期时间和上面计算的节点最小重连/取消限流时间，得出最小阻塞时间
         // If we have any nodes that are ready to send + have sendable data, poll with 0 timeout so this can immediately
         // loop and try sending more data. Otherwise, the timeout will be the smaller value between next batch expiry
         // time, and the delay time for checking data availability. Note that the nodes may have data that isn't yet
@@ -749,6 +761,7 @@ public class Sender implements Runnable {
      * Transfer the record batches into a list of produce requests on a per-node basis
      */
     private void sendProduceRequests(Map<Integer, List<ProducerBatch>> collated, long now) {
+        // 一个节点一个节点地发送消息
         for (Map.Entry<Integer, List<ProducerBatch>> entry : collated.entrySet())
             sendProduceRequest(now, entry.getKey(), acks, requestTimeoutMs, entry.getValue());
     }
@@ -799,6 +812,7 @@ public class Sender implements Runnable {
             }
         };
 
+        // 发送网络请求
         String nodeId = Integer.toString(destination);
         ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0,
                 requestTimeoutMs, callback);
@@ -810,6 +824,7 @@ public class Sender implements Runnable {
      * Wake up the selector associated with this send thread
      */
     public void wakeup() {
+        // 这里只是把NetworkClient唤醒，因为Sender线程只会阻塞在这里
         this.client.wakeup();
     }
 

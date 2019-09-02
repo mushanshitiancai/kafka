@@ -40,6 +40,9 @@ import org.apache.kafka.common.utils.Time;
  * prevents starvation or deadlock when a thread asks for a large chunk of memory and needs to block until multiple
  * buffers are deallocated.
  * </ol>
+ *
+ * 用于控制申请的内存大小不超过限制
+ * 在每次申请和释放的大小为batch.size才有效果，否则达不到重复利用的效果
  */
 public class BufferPool {
 
@@ -105,20 +108,20 @@ public class BufferPool {
         ByteBuffer buffer = null;
         this.lock.lock();
         try {
-            // check if we have a free buffer of the right size pooled
+            // 如果申请的大小正好是块大小并且空闲队列中有空闲块，直接返回（这种情况应该是大概率情况）
             if (size == poolableSize && !this.free.isEmpty())
                 return this.free.pollFirst();
 
-            // now check if the request is immediately satisfiable with the
-            // memory on hand or if we need to block
+            // 计算空闲列表的大小
             int freeListSize = freeSize() * this.poolableSize;
+            // 判断剩余空间是否足够这次申请
             if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request, but need to allocate the buffer
                 freeUp(size);
                 this.nonPooledAvailableMemory -= size;
             } else {
-                // we are out of memory and will have to block
+                // 如果没有申请到内存，需要阻塞等待
                 int accumulated = 0;
                 Condition moreMemory = this.lock.newCondition();
                 try {
@@ -239,6 +242,7 @@ public class BufferPool {
     public void deallocate(ByteBuffer buffer, int size) {
         lock.lock();
         try {
+            // 如果释放的size等于块大小，则直接放入空闲列表，实现回收效果
             if (size == this.poolableSize && size == buffer.capacity()) {
                 buffer.clear();
                 this.free.add(buffer);

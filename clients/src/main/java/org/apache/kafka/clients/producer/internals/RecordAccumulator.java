@@ -211,6 +211,8 @@ public final class RecordAccumulator {
             // 如果双端队列中没有存在ProducerBatch，则上面的追加返回null，这里需要构造ProducerBatch
             // 如果当前的ProducerBatch的空间不够了，则上面的追加返回null，这里需要构造ProducerBatch
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
+
+            // 如果消息小于batch.size则申请batch.size大小的空间，否则申请消息大小的空间
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
             // 从BufferPool申请空间用于创建新的ProducerBatch对象
@@ -450,35 +452,56 @@ public final class RecordAccumulator {
      *     <li>The accumulator has been closed</li>
      * </ul>
      * </ol>
+     *
+     * 获取可以发送的节点列表
      */
     public ReadyCheckResult ready(Cluster cluster, long nowMs) {
         Set<Node> readyNodes = new HashSet<>();
+        // 默认值是Long最大值。在没有发送任何消息时，Sender线程调用ready方法，会得到这个结果，就会让selector一直阻塞。
         long nextReadyCheckDelayMs = Long.MAX_VALUE;
         Set<String> unknownLeaderTopics = new HashSet<>();
 
+        // 如果BufferPool存在因为申请不到内存而等待的情况，则设置exhausted标志位
         boolean exhausted = this.free.queued() > 0;
+
+        // 遍历Topic-Partition双向队列，进行处理
         for (Map.Entry<TopicPartition, Deque<ProducerBatch>> entry : this.batches.entrySet()) {
             TopicPartition part = entry.getKey();
             Deque<ProducerBatch> deque = entry.getValue();
 
+            // 获取Topic-Partition的Leader节点，因为发送是往Leader节点发
             Node leader = cluster.leaderFor(part);
             synchronized (deque) {
+
+                // ProducerBatch队列不为空，但是对应的Partition没有leader，无法进行发送，添加topic到unknownLeaderTopics
                 if (leader == null && !deque.isEmpty()) {
-                    // This is a partition for which leader is not known, but messages are available to send.
-                    // Note that entries are currently not removed from batches when deque is empty.
                     unknownLeaderTopics.add(part.topic());
                 } else if (!readyNodes.contains(leader) && !isMuted(part, nowMs)) {
+                    // 获取队列头部的ProducerBatch
                     ProducerBatch batch = deque.peekFirst();
                     if (batch != null) {
+                        // 获取ProducerBatch从入队开始等待了多久，入队可能是新建入队，也可能是请求失败再次入队
                         long waitedTimeMs = batch.waitedTimeMs(nowMs);
                         boolean backingOff = batch.attempts() > 0 && waitedTimeMs < retryBackoffMs;
                         long timeToWaitMs = backingOff ? retryBackoffMs : lingerMs;
+
+                        // 判断ProducerBatch是否是满的
                         boolean full = deque.size() > 1 || batch.isFull();
+
+                        // 判断ProducerBatch是否等待超时
                         boolean expired = waitedTimeMs >= timeToWaitMs;
+
+                        // 判断队列头部的ProducerBatch是否可以发送
+                        // 1. ProducerBatch已满
+                        // 2. ProducerBatch等待超时
+                        // 3. BufferPool内存耗尽
+                        // 4. 当前RecordAccumulator被关闭
+                        // 5. 当前正在进行flush操作
                         boolean sendable = full || expired || exhausted || closed || flushInProgress();
                         if (sendable && !backingOff) {
                             readyNodes.add(leader);
                         } else {
+                            // 如果不满足发送条件，计算距离下次超时的时间
                             long timeLeftMs = Math.max(timeToWaitMs - waitedTimeMs, 0);
                             // Note that this results in a conservative estimate since an un-sendable partition may have
                             // a leader that will later be found to have sendable data. However, this is good enough
@@ -560,12 +583,14 @@ public final class RecordAccumulator {
                 if (first == null)
                     continue;
 
+                // 如果ProducerBatch处于重试等待期，则跳过
                 // first != null
                 boolean backoff = first.attempts() > 0 && first.waitedTimeMs(now) < retryBackoffMs;
                 // Only drain the batch if it is not during backoff period.
                 if (backoff)
                     continue;
 
+                // 如果结果非空的情况下，消息的大小将大于max.request.size，则停止获取ProducerBatch
                 if (size + first.estimatedSizeInBytes() > maxSize && !ready.isEmpty()) {
                     // there is a rare case that a single batch size is larger than the request size due to
                     // compression; in this case we will still eventually send this batch in a single request
@@ -577,6 +602,8 @@ public final class RecordAccumulator {
                     boolean isTransactional = transactionManager != null && transactionManager.isTransactional();
                     ProducerIdAndEpoch producerIdAndEpoch =
                         transactionManager != null ? transactionManager.producerIdAndEpoch() : null;
+
+                    // 队列头部出队
                     ProducerBatch batch = deque.pollFirst();
                     if (producerIdAndEpoch != null && !batch.hasSequence()) {
                         // If the batch already has an assigned sequence, then we should not change the producer id and
@@ -595,10 +622,14 @@ public final class RecordAccumulator {
 
                         transactionManager.addInFlightBatch(batch);
                     }
+                    // 关闭ProducerBatch
                     batch.close();
+                    // 增加size统计
                     size += batch.records().sizeInBytes();
+                    // 添加ProducerBatch到结果列表中
                     ready.add(batch);
 
+                    // 记录被获取时间
                     batch.drained(now);
                 }
             }

@@ -86,6 +86,7 @@ public class NetworkClient implements KafkaClient {
     private final ClusterConnectionStates connectionStates;
 
     /* the set of requests currently being sent or awaiting a response */
+    // 缓存了已经发出去但是还未收到响应的请求
     private final InFlightRequests inFlightRequests;
 
     /* the socket send buffer size in bytes */
@@ -283,6 +284,9 @@ public class NetworkClient implements KafkaClient {
         if (isReady(node, now))
             return true;
 
+        // 判断是否可以进行连接
+        // 1. 未建立过连接，则可以进行连接
+        // 2. 连接断开，并且在重试窗口期内，则不可以进行连接
         if (connectionStates.canConnect(node.idString(), now))
             // if we are interested in sending to a node and we don't have a connection to it, initiate one
             initiateConnect(node, now);

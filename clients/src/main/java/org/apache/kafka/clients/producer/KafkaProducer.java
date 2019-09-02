@@ -240,6 +240,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     final Metrics metrics;
     private final Partitioner partitioner;
     private final int maxRequestSize;
+    // 对应buffer.memory配置，缓冲区总大小，默认值约32MB
     private final long totalMemorySize;
     private final ProducerMetadata metadata;
     private final RecordAccumulator accumulator;
@@ -393,6 +394,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             int deliveryTimeoutMs = configureDeliveryTimeout(config, log);
 
             this.apiVersions = new ApiVersions();
+
+            // 构造消息累加器
             this.accumulator = new RecordAccumulator(logContext,
                     config.getInt(ProducerConfig.BATCH_SIZE_CONFIG),
                     this.compressionType,
@@ -419,10 +422,13 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.metadata.bootstrap(addresses, time.milliseconds());
             }
             this.errors = this.metrics.sensor("errors");
+
+            // 启动Sender线程，这里被称为ioThread，是后台线程，线程名称为"kafka-producer-network-thread | {clientId}"
             this.sender = newSender(logContext, kafkaClient, this.metadata);
             String ioThreadName = NETWORK_THREAD_PREFIX + " | " + clientId;
             this.ioThread = new KafkaThread(ioThreadName, this.sender, true);
             this.ioThread.start();
+
             config.logUnused();
             AppInfoParser.registerAppInfo(JMX_PREFIX, clientId, metrics, time.milliseconds());
             log.debug("Kafka producer started");
@@ -925,7 +931,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
                     serializedValue, headers, interceptCallback, remainingWaitMs);
 
-            // 如果消息累加器缓冲区满了，唤醒发送线程
+            // 如果新建ProducerBatch或者ProducerBatch满了，唤醒发送线程
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
                 this.sender.wakeup();
