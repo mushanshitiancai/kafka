@@ -384,10 +384,10 @@ public class Sender implements Runnable {
             }
         }
 
+        // 从待发送Batch列表中取出已经超时的Batch，超时时间由delivery.timeout.ms配置项决定
         accumulator.resetNextBatchExpiryTime();
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
-        // 根据配置项${request.timeout.ms}的值,默认是 30s,过滤掉请求已超时的ProducerBatch,
-        // 若已超时则将该 ProducerBatch添加到过期队列List中,并将该ProducerBatch从双端队列中移除,同时释放内存空间
+        // 从累加器中取出已经超时的Batch，超时时间由delivery.timeout.ms配置项决定
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
         expiredBatches.addAll(expiredInflightBatches);
 
@@ -399,6 +399,8 @@ public class Sender implements Runnable {
         for (ProducerBatch expiredBatch : expiredBatches) {
             String errorMessage = "Expiring " + expiredBatch.recordCount + " record(s) for " + expiredBatch.topicPartition
                 + ":" + (now - expiredBatch.createdMs) + " ms has passed since batch creation";
+
+            // 设置ProducerBatch为失败状态，会触发回调并回收ProducerBatch
             failBatch(expiredBatch, -1, NO_TIMESTAMP, new TimeoutException(errorMessage), false);
             if (transactionManager != null && expiredBatch.inRetry()) {
                 // This ensures that no new batches are drained until the current in flight batches are fully resolved.
@@ -580,18 +582,21 @@ public class Sender implements Runnable {
     }
 
     /**
-     * Handle a produce response
+     * 处理请求完成回调
      */
     private void handleProduceResponse(ClientResponse response, Map<TopicPartition, ProducerBatch> batches, long now) {
         RequestHeader requestHeader = response.requestHeader();
         long receivedTimeMs = response.receivedTimeMs();
         int correlationId = requestHeader.correlationId();
+
         if (response.wasDisconnected()) {
+            // 连接中断
             log.trace("Cancelled request with header {} due to node {} being disconnected",
                 requestHeader, response.destination());
             for (ProducerBatch batch : batches.values())
                 completeBatch(batch, new ProduceResponse.PartitionResponse(Errors.NETWORK_EXCEPTION), correlationId, now, 0L);
         } else if (response.versionMismatch() != null) {
+            // 版本不匹配
             log.warn("Cancelled request {} due to a version mismatch with node {}",
                     response, response.destination(), response.versionMismatch());
             for (ProducerBatch batch : batches.values())
@@ -728,6 +733,9 @@ public class Sender implements Runnable {
         failBatch(batch, response.baseOffset, response.logAppendTime, exception, adjustSequenceNumbers);
     }
 
+    /**
+     * 设置ProducerBatch为失败状态，会触发回调并回收ProducerBatch
+     */
     private void failBatch(ProducerBatch batch,
                            long baseOffset,
                            long logAppendTime,
@@ -806,6 +814,7 @@ public class Sender implements Runnable {
         }
         ProduceRequest.Builder requestBuilder = ProduceRequest.Builder.forMagic(minUsedMagic, acks, timeout,
                 produceRecordsByPartition, transactionalId);
+        // 设置请求完成的回调
         RequestCompletionHandler callback = new RequestCompletionHandler() {
             public void onComplete(ClientResponse response) {
                 handleProduceResponse(response, recordsByPartition, time.milliseconds());

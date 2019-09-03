@@ -208,8 +208,9 @@ public final class RecordAccumulator {
                     return appendResult;
             }
 
-            // 如果双端队列中没有存在ProducerBatch，则上面的追加返回null，这里需要构造ProducerBatch
-            // 如果当前的ProducerBatch的空间不够了，则上面的追加返回null，这里需要构造ProducerBatch
+            // 如果双端队列中没有存在ProducerBatch，
+            // 或者当前的ProducerBatch的空间不够了，
+            // 则上面的追加返回null，这里需要构造ProducerBatch
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
 
             // 如果消息小于batch.size则申请batch.size大小的空间，否则申请消息大小的空间
@@ -236,7 +237,7 @@ public final class RecordAccumulator {
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, time.milliseconds());
                 FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, headers, callback, time.milliseconds()));
 
-                // 添加ProducerBatch到双端队列
+                // 添加ProducerBatch到双向队列尾部
                 dq.addLast(batch);
                 // 添加ProducerBatch到未完成队列
                 incomplete.add(batch);
@@ -277,8 +278,13 @@ public final class RecordAccumulator {
         if (last != null) {
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, time.milliseconds());
             if (future == null)
+                // 如果返回null，说明没有空间了，对Batch进行close操作
                 last.closeForRecordAppends();
             else
+                // 判断ProducerBatch是否满的逻辑
+                // 1. 双向队列中不止一个Batch，说明因为写入失败新建了Batch，说明有Batch是满的
+                // 2. Batch.isFull()
+                // 说明RecordAppendResult.batchIsFull并不是完全代表当前写的batch是否满了，而是代表是否有满的Batch
                 return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false);
         }
         return null;

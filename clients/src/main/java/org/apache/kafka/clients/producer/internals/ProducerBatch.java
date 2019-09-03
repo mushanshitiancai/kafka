@@ -193,6 +193,7 @@ public final class ProducerBatch {
             log.trace("Failed to produce messages to {} with base offset {}.", topicPartition, baseOffset, exception);
         }
 
+        // 如果是第一次设置最终状态
         if (this.finalState.compareAndSet(null, tryFinalState)) {
             completeFutureAndFireCallbacks(baseOffset, logAppendTime, exception);
             return true;
@@ -200,16 +201,16 @@ public final class ProducerBatch {
 
         if (this.finalState.get() != FinalState.SUCCEEDED) {
             if (tryFinalState == FinalState.SUCCEEDED) {
-                // Log if a previously unsuccessful batch succeeded later on.
+                // 原先不成功，后面修改为成功，这里只是记录一下日志
                 log.debug("ProduceResponse returned {} for {} after batch with base offset {} had already been {}.",
                     tryFinalState, topicPartition, baseOffset, this.finalState.get());
             } else {
-                // FAILED --> FAILED and ABORTED --> FAILED transitions are ignored.
+                // FAILED --> FAILED and ABORTED --> FAILED 的状态修改忽略
                 log.debug("Ignored state transition {} -> {} for {} batch with base offset {}",
                     this.finalState.get(), tryFinalState, topicPartition, baseOffset);
             }
         } else {
-            // A SUCCESSFUL batch must not attempt another state change.
+            // 已经成功的Batch，不能再修改状态
             throw new IllegalStateException("A " + this.finalState.get() + " batch must not attempt another state change to " + tryFinalState);
         }
         return false;
@@ -219,7 +220,7 @@ public final class ProducerBatch {
         // Set the future before invoking the callbacks as we rely on its state for the `onCompletion` call
         produceFuture.set(baseOffset, logAppendTime, exception);
 
-        // execute callbacks
+        // 调用所有添加消息注册的回调，这里是做到了按顺序回调
         for (Thunk thunk : thunks) {
             try {
                 if (exception == null) {
@@ -235,6 +236,7 @@ public final class ProducerBatch {
             }
         }
 
+        // 将本ProducerBatch的CountdownLatch状态改变为完成状态，这个会影响到该Batch所有添加消息返回的Future对象
         produceFuture.done();
     }
 
