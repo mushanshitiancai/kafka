@@ -281,6 +281,11 @@ public class NetworkClient implements KafkaClient {
         if (node.isEmpty())
             throw new IllegalArgumentException("Cannot connect to empty node " + node);
 
+        // 判断是否可以发送消息，需要满足以下所有条件
+        // 1. metadata信息没有过期
+        // 2. 与node的连接已建立
+        // 3. channel就绪
+        // 4. inFlightRequests队列中没有未发送的消息
         if (isReady(node, now))
             return true;
 

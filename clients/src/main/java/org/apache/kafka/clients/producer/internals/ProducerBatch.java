@@ -403,6 +403,10 @@ public final class ProducerBatch {
         recordsBuilder.closeForRecordAppends();
     }
 
+    /**
+     * 关闭当前Batch，会关闭recordsBuilder，构造出完整的MemoryRecords，用于发送
+     * 调用时机：RecordAccumulator.drain逻辑中，ProducerBatch可以被发送出队时
+     */
     public void close() {
         recordsBuilder.close();
         if (!recordsBuilder.isControlBatch()) {

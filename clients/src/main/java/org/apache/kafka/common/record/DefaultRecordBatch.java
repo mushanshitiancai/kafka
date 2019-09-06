@@ -465,8 +465,11 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         buffer.putShort(position + PRODUCER_EPOCH_OFFSET, epoch);
         buffer.putInt(position + BASE_SEQUENCE_OFFSET, sequence);
         buffer.putInt(position + RECORDS_COUNT_OFFSET, numRecords);
+
+        // 计算CRC32逻辑
         long crc = Crc32C.compute(buffer, ATTRIBUTES_OFFSET, sizeInBytes - ATTRIBUTES_OFFSET);
         buffer.putInt(position + CRC_OFFSET, (int) crc);
+
         buffer.position(position + RECORD_BATCH_OVERHEAD);
     }
 

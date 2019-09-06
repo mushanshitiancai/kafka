@@ -361,8 +361,12 @@ public class Sender implements Runnable {
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
-            // 判断节点是否可以建立连接，如果可以建立连接
-            // 如果无法建立连接，则剔除
+            // 判断是否可以发送消息，需要满足以下所有条件
+            // 1. metadata信息没有过期
+            // 2. 与node的连接已建立
+            // 3. channel就绪
+            // 4. inFlightRequests队列中没有未发送的消息ProducerBatch
+            // 如果无法发送消息，则剔除
             if (!this.client.ready(node, now)) {
                 iter.remove();
                 // 记录节点重连或者限流时间，用于计算阻塞时间

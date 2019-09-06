@@ -306,7 +306,10 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         this.isTransactional = isTransactional;
     }
 
-
+    /**
+     * 关闭Record构造器，会关闭appendStream，然后填充头部（包含计算CRC32）
+     * 调用时机：调用时机：RecordAccumulator.drain逻辑中，ProducerBatch可以被发送出队时，会close ProducerBatch，进而调用这里
+     */
     public void close() {
         if (aborted)
             throw new IllegalStateException("Cannot close MemoryRecordsBuilder as it has already been aborted");
@@ -351,8 +354,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     }
 
     /**
-     * Write the header to the default batch.
-     * @return the written compressed bytes.
+     * 填充头部信息，包含CRC23
      */
     private int writeDefaultBatchHeader() {
         ensureOpenForRecordBatchWrite();

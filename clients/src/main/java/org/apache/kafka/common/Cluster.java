@@ -35,16 +35,17 @@ import java.util.Set;
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
+    // 节点列表
     private final List<Node> nodes;
     private final Set<String> unauthorizedTopics;
     private final Set<String> invalidTopics;
     private final Set<String> internalTopics;
     private final Node controller;
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
-    private final Map<String, List<PartitionInfo>> partitionsByTopic;
-    private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
-    private final Map<Integer, List<PartitionInfo>> partitionsByNode;
-    private final Map<Integer, Node> nodesById;
+    private final Map<String /* topic */, List<PartitionInfo>> partitionsByTopic;
+    private final Map<String /* topic */, List<PartitionInfo>> availablePartitionsByTopic;
+    private final Map<Integer /* nodeId */, List<PartitionInfo>> partitionsByNode;
+    private final Map<Integer /* nodeId */, Node> nodesById;
     private final ClusterResource clusterResource;
 
     /**

@@ -483,6 +483,8 @@ public final class RecordAccumulator {
                 if (leader == null && !deque.isEmpty()) {
                     unknownLeaderTopics.add(part.topic());
                 } else if (!readyNodes.contains(leader) && !isMuted(part, nowMs)) {
+                    // 如果节点已经认为是有消息需要发送，或者partition被禁止，则跳过
+
                     // 获取队列头部的ProducerBatch
                     ProducerBatch batch = deque.peekFirst();
                     if (batch != null) {
@@ -575,7 +577,7 @@ public final class RecordAccumulator {
             TopicPartition tp = new TopicPartition(part.topic(), part.partition());
             this.drainIndex = (this.drainIndex + 1) % parts.size();
 
-            // Only proceed if the partition has no in-flight batches.
+            // 只处理没有in-flight状态的batch的partition
             if (isMuted(tp, now))
                 continue;
 
@@ -628,7 +630,7 @@ public final class RecordAccumulator {
 
                         transactionManager.addInFlightBatch(batch);
                     }
-                    // 关闭ProducerBatch
+                    // 关闭ProducerBatch，会完成ProducerBatch的写入工作，填充头部等，关闭后，Batch就可以被写入网络流了
                     batch.close();
                     // 增加size统计
                     size += batch.records().sizeInBytes();
@@ -711,9 +713,7 @@ public final class RecordAccumulator {
     }
 
     /**
-     * Are there any threads currently waiting on a flush?
-     *
-     * package private for test
+     * 判断是否有外部要求进行Flush操作
      */
     boolean flushInProgress() {
         return flushesInProgress.get() > 0;
@@ -725,7 +725,8 @@ public final class RecordAccumulator {
     }
 
     /**
-     * Initiate the flushing of data from the accumulator...this makes all requests immediately ready
+     * 表示外部要求进行Flush操作，这会使累加器认为所有的Bath都是要被发送的
+     * 调用时机：1.KafkaProducer.flush 2.Sender中事务相关逻辑
      */
     public void beginFlush() {
         this.flushesInProgress.getAndIncrement();
@@ -739,7 +740,8 @@ public final class RecordAccumulator {
     }
 
     /**
-     * Mark all partitions as ready to send and block until the send is complete
+     * 等待Flush操作结束，也就是等待所有的Batch请求完成
+     * 调用时机：KafkaProducer.flush
      */
     public void awaitFlushCompletion() throws InterruptedException {
         try {
@@ -819,16 +821,25 @@ public final class RecordAccumulator {
         }
     }
 
+    /**
+     * 屏蔽partition，该partition的batch不会被发送
+     * 调用时机：Sender线程，得到需要发送的batch后，如果判断需要保证消息有序（max.in.flight.requests.per.connection == 1）
+     *          则会调用本方法
+     */
     public void mutePartition(TopicPartition tp) {
         muted.put(tp, Long.MAX_VALUE);
     }
 
+    /**
+     * 解开对partition的屏蔽
+     * 调用时机：Sender.completeBatch
+     */
     public void unmutePartition(TopicPartition tp, long throttleUntilTimeMs) {
         muted.put(tp, throttleUntilTimeMs);
     }
 
     /**
-     * Close this accumulator and force all the record buffers to be drained
+     * 标记累加器为关闭状态，这会使累加器认为所有的Bath都是要被发送的
      */
     public void close() {
         this.closed = true;
